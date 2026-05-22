@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Stick 'Em Self-Balancing Robot</title>
+  <title>Stick 'Em Balancer Bot</title>
   
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
@@ -111,12 +111,18 @@
     const SERVICE = 0xFFE0;
     const TX_CHAR = 0xFFE1;
 
-    let bleDevice = null;   // CRITICAL: Must maintain global reference to prevent Android garbage collection from disconnecting
-    let bleChar   = null;
+    // References stored globally to guarantee Chrome garbage collection never breaks the link
+    let bleDevice  = null;   
+    let bleServer  = null;
+    let bleService = null;
+    let bleChar    = null;
+    
     let connected = false;
     let pending   = null;   
     let lastSent  = null;   
     let writing   = false;  
+    let lastWriteTime = 0;  // Holds timestamp of previous transmission
+    const WRITE_COOLDOWN = 35; // Maximum transmission speed capped at ~30Hz to prevent BLE stack overload
 
     const statusEl = document.getElementById('status');
 
@@ -124,12 +130,13 @@
 
     async function connect() {
       try {
+        statusEl.textContent = 'Searching for board...';
         const device = await navigator.bluetooth.requestDevice({
           filters: [{ namePrefix: '⠀' }],
           optionalServices: [SERVICE],
         });
         
-        bleDevice = device; // Store reference globally to keep connection alive on Android Chrome
+        bleDevice = device; 
         
         device.addEventListener('gattserverdisconnected', () => {
           connected = false;
@@ -139,7 +146,11 @@
         });
         
         const server  = await device.gatt.connect();
+        bleServer = server;
+        
         const service = await server.getPrimaryService(SERVICE);
+        bleService = service;
+        
         bleChar = await service.getCharacteristic(TX_CHAR);
         connected = true;
         statusEl.textContent = 'Connected: ' + device.name;
@@ -148,6 +159,7 @@
         startTime = performance.now(); // Reset baseline timer for graph and table
       } catch (e) {
         statusEl.textContent = 'Connect failed: ' + e.message;
+        console.error(e);
       }
     }
 
@@ -167,29 +179,23 @@
       voiceOffsetGamma = 0;
     };
 
-    // CRITICAL: Chunk larger payloads into 20-byte BLE packets to prevent receiver overflows
+    // Robust native write sequence with software-level rate limiting
     async function sendRaw(cmd) {
       if (!connected || !bleChar || writing) return;
+      
+      const now = performance.now();
+      if (now - lastWriteTime < WRITE_COOLDOWN) return; // Prevent excessive speed write errors
+      
       writing = true;
       try {
         const encoder = new TextEncoder();
         const data = encoder.encode(cmd);
-        const chunkSize = 20; // Standard BLE MTU payload limit
-
-        for (let i = 0; i < data.length; i += chunkSize) {
-          const chunk = data.slice(i, i + chunkSize);
-          
-          // Use writeValueWithoutResponse if available for faster, safer transmission on Android
-          if (bleChar.writeValueWithoutResponse) {
-            await bleChar.writeValueWithoutResponse(chunk);
-          } else {
-            await bleChar.writeValue(chunk);
-          }
-          
-          // Tiny delay to let cheap serial microcontrollers process the input buffer
-          await new Promise(resolve => setTimeout(resolve, 10));
-        }
+        
+        // Single atomic transmission - lets the browser securely segment packages natively
+        await bleChar.writeValue(data);
+        
         lastSent = cmd;
+        lastWriteTime = performance.now();
       } catch (e) {
         console.warn('write failed', e);
       } finally {
@@ -201,7 +207,7 @@
       setInterval(() => {
         if (!connected || !pending || pending === lastSent || writing) return;
         sendRaw(pending);
-      }, 25); // Main standard execution loop (~40 Hz)
+      }, 25); // ~40 Hz execution interval
     }
 
 
@@ -218,7 +224,7 @@
     let startTime = performance.now();
     let isRunning = false; // State-tracking flag for start/stop toggle
     let recognition = null; // Hold speech recognition instance globally
-    let speechActive = false; // State-tracking flag to prevent crash-restarting speech engine
+    let speechActive = false; // Prevents crash re-invocations
 
     // DOM Elements for real-time dashboard updates
     const printBeta = document.getElementById('print-beta');
@@ -279,7 +285,7 @@
     };
 
     async function startRun() {
-      // A. Prompt sensor orientation permissions (Required for newer iOS/some mobile devices)
+      // A. Prompt sensor orientation permissions
       if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
         try {
           const permissionState = await DeviceOrientationEvent.requestPermission();
@@ -291,7 +297,7 @@
         }
       }
 
-      // B. Start Voice Recognition inside click interaction (Fixes Android Chrome autoplay mic block)
+      // B. Start Voice Recognition inside click interaction
       startSpeechRecognition();
 
       // C. Transition system state parameters
@@ -301,6 +307,9 @@
       startStopBtn.className = "danger";
       voiceDisplay.textContent = "Listening...";
       document.body.style.background = connected ? '#bae6fd' : '#e0f2fe';
+
+      // Cold start servo activation: instantly drive servos to neutral center so they engage immediately
+      window.sendServos(1500, 1500, null, null, null, null, null, null);
     }
 
     function stopRun() {
@@ -311,7 +320,7 @@
       
       // Stop and clean up Voice Engine safely
       if (recognition) {
-        recognition.onend = null; // Unhook automatic restarts to prevent loop crashes
+        recognition.onend = null; // Unhook restarts to prevent recursive activations
         try {
           recognition.stop();
         } catch (e) {
@@ -365,7 +374,7 @@
       }
     }
 
-    // 4. Voice Command Control Processing (With robust auto-restart logic)
+    // 4. Voice Command Control Processing (Optimized Single-Phrase Continuous Restart Loop)
     function startSpeechRecognition() {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SpeechRecognition) {
@@ -373,10 +382,11 @@
         return;
       }
 
-      // Avoid creating multiple duplicate listening instances
       if (!recognition) {
         recognition = new SpeechRecognition();
-        recognition.continuous = true;
+        
+        // Android Chrome workaround: continuous=false is significantly more stable
+        recognition.continuous = false; 
         recognition.interimResults = false;
         recognition.lang = 'en-US';
 
@@ -385,7 +395,7 @@
         };
 
         recognition.onresult = (event) => {
-          if (!isRunning) return; // Ignore updates if run is stopped
+          if (!isRunning) return; 
           const lastResultIndex = event.results.length - 1;
           const commandText = event.results[lastResultIndex][0].transcript.toLowerCase().trim();
           
@@ -401,19 +411,20 @@
           }
         };
 
+        // When a phrase finishes, cleanly drop the audio pipelines and spin a fresh session back up
         recognition.onend = () => { 
           speechActive = false;
-          // De-bounced auto-restart: allows browser audio pipelines to fully unload
           if (isRunning) {
             setTimeout(() => {
               if (isRunning && !speechActive) {
                 try {
                   recognition.start(); 
+                  speechActive = true;
                 } catch(e) {
                   console.warn("Speech restart skipped: ", e);
                 }
               }
-            }, 300); // 300ms cool-down prevents Chrome engine crashes
+            }, 100); // Fast 100ms cycle restart time
           }
         };
       }
@@ -421,6 +432,7 @@
       if (!speechActive) {
         try {
           recognition.start();
+          speechActive = true;
         } catch (e) {
           console.warn("Speech already active: ", e);
         }
@@ -445,12 +457,18 @@
         voiceOffsetGamma = 15;  // Induce banking tilt to right
       }
 
+      // Re-trigger balance calculation instantly to respond to voice command without sensor lag
+      if (isRunning) {
+        calculateBalance();
+      }
+
       // Reset shift tracking frame back to standard neutral after 1 second
       voiceTimeout = setTimeout(() => {
         voiceOffsetBeta = 0;
         voiceOffsetGamma = 0;
         if (isRunning) {
           voiceDisplay.textContent = "Listening...";
+          calculateBalance();
         }
       }, 1000);
     }
