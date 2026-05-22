@@ -86,7 +86,6 @@
       targetGamma: 0,       
       pGainBeta: 15,        
       pGainGamma: 8,        
-      // TUNE THESE: Adjust these offsets up or down until the 1-second burst moves exactly 10cm or 90 degrees!
       voicePitchOffset: 20, 
       voiceRollOffset: 25,  
       servoNeutral: 1500,   
@@ -130,12 +129,25 @@
     async function sendRaw() {
       if (!connected || !pending || pending === lastSent || writing) return;
       writing = true;
+
+      // THE FIX: Watchdog Timer
+      // Forcefully unlocks the writing guard if the Bluetooth stack hangs
+      let watchdog = setTimeout(() => {
+        writing = false;
+      }, 150);
+
       try {
-        await bleChar.writeValue(new TextEncoder().encode(pending));
+        // Attempt faster "writeWithoutResponse" if the hardware supports it
+        if (bleChar.properties && bleChar.properties.writeWithoutResponse) {
+          await bleChar.writeValueWithoutResponse(new TextEncoder().encode(pending));
+        } else {
+          await bleChar.writeValue(new TextEncoder().encode(pending));
+        }
         lastSent = pending;
       } catch (e) {
         console.warn('BLE write dropped', e);
       } finally {
+        clearTimeout(watchdog);
         writing = false;
       }
     }
@@ -277,21 +289,17 @@
       else if (cmd.includes('right') || cmd.includes('turn right')) { vOffsetB = 0; vOffsetG = TUNING.voiceRollOffset; }
       else return;
 
-      // FIX: Force the math to update and send to motors IMMEDIATELY upon hearing the command
       if (isRunning) calculateBalance();
 
-      // Exactly 1s (1000ms) duration for the movement
       voiceTimer = setTimeout(() => {
         vOffsetB = 0; vOffsetG = 0;
         document.getElementById('voice-command').textContent = "Listening...";
-        
-        // FIX: Force the math to update and send to motors IMMEDIATELY when the timer ends
         if (isRunning) calculateBalance();
       }, 1000);
     }
 
     // ==========================================
-    // CHART & TABLE UPDATES 
+    // CHART & TABLE UPDATES
     // ==========================================
     const ctx = document.getElementById('liveChart').getContext('2d');
     const liveChart = new Chart(ctx, {
