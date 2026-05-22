@@ -82,12 +82,13 @@
     // TUNING VARIABLES
     // ==========================================
     const TUNING = {
-      targetBeta: 90,       // Will be overwritten by the Calibrate button
-      targetGamma: 0,       // Will be overwritten by the Calibrate button
-      pGainBeta: 15,        // Multiplier for front/back tilt corrections
-      pGainGamma: 8,        // Multiplier for steering corrections
-      voicePitchOffset: 20, // Degrees to artificially lean when saying Forward/Backward
-      voiceRollOffset: 25,  // Degrees to artificially lean when turning Left/Right
+      targetBeta: 90,       
+      targetGamma: 0,       
+      pGainBeta: 15,        
+      pGainGamma: 8,        
+      // TUNE THESE: Adjust these offsets up or down until the 1-second burst moves exactly 10cm or 90 degrees!
+      voicePitchOffset: 20, 
+      voiceRollOffset: 25,  
       servoNeutral: 1500,   
       servoMin: 1200,       
       servoMax: 1800        
@@ -114,13 +115,12 @@
         connected = true;
         document.getElementById('status').textContent = 'Connected!';
         document.body.style.background = '#bae6fd';
-        setInterval(sendRaw, 50); // 50ms (20Hz) limit to prevent disconnects
+        setInterval(sendRaw, 50); 
       } catch (e) {
         document.getElementById('status').textContent = 'Connection failed.';
       }
     };
 
-    // Left is Slot 1, Right is Slot 2
     window.sendServos = function (left, right) {
       let m1 = Math.max(1000, Math.min(2000, Math.round(left)));
       let m2 = Math.max(1000, Math.min(2000, Math.round(right)));
@@ -165,7 +165,6 @@
       if (isRunning) calculateBalance();
     });
 
-    // Calibrate button fixes the "Fixed PWM" issue by setting the true 0 point
     document.getElementById('calibrate').onclick = () => {
       TUNING.targetBeta = beta;
       TUNING.targetGamma = gamma;
@@ -199,11 +198,9 @@
       let pitchCorrection = errorBeta * TUNING.pGainBeta;
       let rollCorrection = errorGamma * TUNING.pGainGamma;
 
-      // Assuming Left (S1) and Right (S2) are mounted mirroring each other
       let leftPWM = TUNING.servoNeutral + pitchCorrection + rollCorrection;
       let rightPWM = TUNING.servoNeutral - pitchCorrection + rollCorrection;
 
-      // Deadband bypass to prevent weak stalling signals
       if (leftPWM > 1500 && leftPWM < 1530) leftPWM = 1530;
       if (leftPWM < 1500 && leftPWM > 1470) leftPWM = 1470;
       if (rightPWM > 1500 && rightPWM < 1530) rightPWM = 1530;
@@ -273,20 +270,28 @@
 
     function handleCommand(cmd) {
       clearTimeout(voiceTimer);
+      
       if (cmd.includes('forward')) { vOffsetB = -TUNING.voicePitchOffset; vOffsetG = 0; }
       else if (cmd.includes('backward') || cmd.includes('back')) { vOffsetB = TUNING.voicePitchOffset; vOffsetG = 0; }
-      else if (cmd.includes('left')) { vOffsetB = 0; vOffsetG = -TUNING.voiceRollOffset; }
-      else if (cmd.includes('right')) { vOffsetB = 0; vOffsetG = TUNING.voiceRollOffset; }
+      else if (cmd.includes('left') || cmd.includes('turn left')) { vOffsetB = 0; vOffsetG = -TUNING.voiceRollOffset; }
+      else if (cmd.includes('right') || cmd.includes('turn right')) { vOffsetB = 0; vOffsetG = TUNING.voiceRollOffset; }
       else return;
 
+      // FIX: Force the math to update and send to motors IMMEDIATELY upon hearing the command
+      if (isRunning) calculateBalance();
+
+      // Exactly 1s (1000ms) duration for the movement
       voiceTimer = setTimeout(() => {
         vOffsetB = 0; vOffsetG = 0;
         document.getElementById('voice-command').textContent = "Listening...";
+        
+        // FIX: Force the math to update and send to motors IMMEDIATELY when the timer ends
+        if (isRunning) calculateBalance();
       }, 1000);
     }
 
     // ==========================================
-    // CHART & TABLE UPDATES (All 4 Lines Restored)
+    // CHART & TABLE UPDATES 
     // ==========================================
     const ctx = document.getElementById('liveChart').getContext('2d');
     const liveChart = new Chart(ctx, {
@@ -314,18 +319,16 @@
       let lPWM = parseInt(document.getElementById('print-s1').textContent);
       let rPWM = parseInt(document.getElementById('print-s2').textContent);
 
-      // Update Table (Right servo goes before Left to match headers)
       const row = `<tr><td>${timeStr}</td><td>${Math.round(beta)}</td><td>${Math.round(gamma)}</td><td>${rPWM}</td><td>${lPWM}</td></tr>`;
       const tbody = document.querySelector('#data-table tbody');
       tbody.insertAdjacentHTML('afterbegin', row);
       if (tbody.children.length > 20) tbody.removeChild(tbody.lastChild);
 
-      // Update Chart
       liveChart.data.labels.push(timeStr);
       liveChart.data.datasets[0].data.push(beta);
       liveChart.data.datasets[1].data.push(gamma);
-      liveChart.data.datasets[2].data.push(rPWM); // Right Servo
-      liveChart.data.datasets[3].data.push(lPWM); // Left Servo
+      liveChart.data.datasets[2].data.push(rPWM); 
+      liveChart.data.datasets[3].data.push(lPWM); 
       
       if (liveChart.data.labels.length > 30) {
         liveChart.data.labels.shift();
