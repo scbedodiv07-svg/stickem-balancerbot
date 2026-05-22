@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stick 'Em Self-Balancing Robot</title>
+  
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    body { 
+      font-family: system-ui, -apple-system, sans-serif; 
+      padding: 16px; 
+      background: #f3f4f6; 
+      color: #111; 
+      transition: background 0.3s; 
+      margin: 0;
+    }
+    h1 { font-size: 24px; text-align: center; margin-bottom: 8px; }
+    .container { max-width: 600px; margin: 0 auto; }
+    
+    /* Control Panel Styles */
+    .panel { background: white; padding: 16px; border-radius: 12px; margin-bottom: 16px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .btn-group { display: flex; gap: 8px; margin-bottom: 12px; }
+    button { flex: 1; font-size: 16px; padding: 14px; border-radius: 8px; border: 0; cursor: pointer; font-weight: bold; transition: all 0.2s; }
+    .primary { background: #20a7d9; color: white; }
+    .danger  { background: #ef4444; color: white; }
+    .success { background: #22c55e; color: white; }
+    
+    /* Visual Readouts */
+    #status { font-size: 14px; text-align: center; color: #6b7280; margin-bottom: 12px; }
+    .voice-box { background: #e0f2fe; border: 2px solid #0284c7; padding: 12px; text-align: center; border-radius: 8px; font-size: 18px; font-weight: bold; margin-bottom: 16px; }
+    
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; text-align: center; }
+    .data-card { background: #f9fafb; padding: 10px; border-radius: 8px; border: 1px solid #e5e7eb; }
+    .data-card div:first-child { font-size: 12px; color: #6b7280; text-transform: uppercase; }
+    .data-card div:last-child { font-size: 20px; font-weight: bold; margin-top: 4px; }
+
+    /* Graph & Table Containers */
+    .chart-container { position: relative; height: 220px; width: 100%; margin-bottom: 16px; }
+    .table-container { overflow-x: auto; max-height: 150px; border: 1px solid #e5e7eb; border-radius: 8px; background: white; }
+    table { width: 100%; border-collapse: collapse; text-align: left; font-size: 12px; }
+    th { background: #f3f4f6; position: sticky; top: 0; padding: 8px; font-weight: 600; }
+    td { padding: 8px; border-top: 1px solid #e5e7eb; }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <h1>Stick 'Em Balancer</h1>
+    
+    <div id="status">Not connected</div>
+
+    <div class="btn-group">
+      <button id="connect" class="primary">Connect Board</button>
+      <button id="start-stop" class="success">START RUN</button>
+    </div>
+
+    <div class="voice-box">
+      Voice Command: <span id="voice-command">Not Started</span>
+    </div>
+
+    <div class="grid">
+      <div class="data-card">
+        <div>Front/Back Tilt (ß)</div>
+        <div id="print-beta">0°</div>
+      </div>
+      <div class="data-card">
+        <div>Left/Right Tilt (γ)</div>
+        <div id="print-gamma">0°</div>
+      </div>
+      <div class="data-card">
+        <div>Left Servo (S1)</div>
+        <div id="print-s1">1500 us</div>
+      </div>
+      <div class="data-card">
+        <div>Right Servo (S2)</div>
+        <div id="print-s2">1500 us</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="chart-container">
+        <canvas id="liveChart"></canvas>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Data Log</h3>
+      <div class="table-container">
+        <table id="data-table">
+          <thead>
+            <tr>
+              <th>Run Time (s)</th>
+              <th>Front/Back Tilt (°)</th>
+              <th>Left/Right Tilt (°)</th>
+              <th>Left Servo (us)</th>
+              <th>Right Servo (us)</th>
+            </tr>
+          </thead>
+          <tbody>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <script type="module">
+    // --- BLE FIRMWARE PROTOCOL PLUMBING ---
+    const SERVICE = 0xFFE0;
+    const TX_CHAR = 0xFFE1;
+
+    let bleChar   = null;
+    let connected = false;
+    let pending   = null;   
+    let lastSent  = null;   
+    let writing   = false;  
+
+    const statusEl = document.getElementById('status');
+
+    document.getElementById('connect').onclick = connect;
+
+    async function connect() {
+      try {
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ namePrefix: '⠀' }],
+          optionalServices: [SERVICE],
+        });
+        device.addEventListener('gattserverdisconnected', () => {
+          connected = false;
+          statusEl.textContent = 'Disconnected';
+          document.body.style.background = '#fecaca'; // Turns screen red on disconnect
+          stopRun();
+        });
+        const server  = await device.gatt.connect();
+        const service = await server.getPrimaryService(SERVICE);
+        bleChar = await service.getCharacteristic(TX_CHAR);
+        connected = true;
+        statusEl.textContent = 'Connected: ' + device.name;
+        document.body.style.background = '#bae6fd';
+        startSendLoop();
+        startTime = performance.now(); // Reset baseline timer for graph and table
+      } catch (e) {
+        statusEl.textContent = 'Connect failed: ' + e.message;
+      }
+    }
+
+    // Standard control function provided by template
+    window.sendServos = function (m1, m2, m3, m4, m5, m6, m7, m8) {
+      const slots = [m1, m2, m3, m4, m5, m6, m7, m8].map(v =>
+        (v === null || v === undefined)
+          ? '-'
+          : Math.max(1000, Math.min(2000, Math.round(v)))
+      );
+      pending = `mv:${slots.join(':')},`;
+    };
+
+    window.stopAll = function () { 
+      pending = 'stopAll,'; 
+      voiceOffsetBeta = 0;
+      voiceOffsetGamma = 0;
+    };
+
+    async function sendRaw(cmd) {
+      if (!connected || !bleChar || writing) return;
+      writing = true;
+      try {
+        await bleChar.writeValue(new TextEncoder().encode(cmd));
+        lastSent = cmd;
+      } catch (e) {
+        console.warn('write failed', e);
+      } finally {
+        writing = false;
+      }
+    }
+
+    function startSendLoop() {
+      setInterval(() => {
+        if (!connected || !pending || pending === lastSent || writing) return;
+        sendRaw(pending);
+      }, 25); // Main standard execution loop (~40 Hz)
+    }
+
+
+    // --- WORKSHOP PROJECT LOGIC ---
+
+    let beta = 0;  // Front/Back tilt (-180 to 180)
+    let gamma = 0; // Left/Right tilt (-90 to 90)
+    
+    // Voice offsets change the balance point temporarily to make the robot move
+    let voiceOffsetBeta = 0;
+    let voiceOffsetGamma = 0;
+    let voiceTimeout = null;
+
+    let startTime = performance.now();
+    let isRunning = false; // State-tracking flag for start/stop toggle
+    let recognition = null; // Hold speech recognition instance globally
+
+    // DOM Elements for real-time dashboard updates
+    const printBeta = document.getElementById('print-beta');
+    const printGamma = document.getElementById('print-gamma');
+    const printS1 = document.getElementById('print-s1');
+    const printS2 = document.getElementById('print-s2');
+    const voiceDisplay = document.getElementById('voice-command');
+    const tableBody = document.getElementById('data-table').querySelector('tbody');
+    const startStopBtn = document.getElementById('start-stop');
+
+    // 1. Initializing the Chart.js Instance
+    const ctx = document.getElementById('liveChart').getContext('2d');
+    const liveChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [], // Time handles
+        datasets: [
+          { label: 'FB Tilt (°)', data: [], borderColor: '#ef4444', borderWidth: 2, pointRadius: 0, fill: false },
+          { label: 'LR Tilt (°)', data: [], borderColor: '#3b82f6', borderWidth: 2, pointRadius: 0, fill: false },
+          { label: 'Left Servo (us)', data: [], borderColor: '#10b981', borderWidth: 1.5, pointRadius: 0, fill: false, yAxisID: 'yServo' },
+          { label: 'Right Servo (us)', data: [], borderColor: '#f59e0b', borderWidth: 1.5, pointRadius: 0, fill: false, yAxisID: 'yServo' }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+          x: { title: { display: true, text: 'Time (s)', font: { size: 10 } } },
+          y: { title: { display: true, text: 'Tilt (Degrees)' }, min: -45, max: 45 },
+          yServo: { title: { display: true, text: 'Servo (us)' }, min: 1000, max: 2000, position: 'right', grid: { drawOnChartArea: false } }
+        },
+        plugins: { legend: { labels: { boxWidth: 12, font: { size: 10 } } } }
+      }
+    });
+
+    // 2. Setting Up Gyroscope Listener
+    window.addEventListener('deviceorientation', (event) => {
+      // Isolate current platform angles
+      beta = event.beta || 0;   
+      gamma = event.gamma || 0; 
+
+      printBeta.textContent = Math.round(beta) + '°';
+      printGamma.textContent = Math.round(gamma) + '°';
+
+      // Only execute mechanical balancing loops if the system run is active
+      if (isRunning) {
+        calculateBalance();
+      }
+    });
+
+    // START / STOP Toggle Logic Handler
+    startStopBtn.onclick = async () => {
+      if (!isRunning) {
+        await startRun();
+      } else {
+        stopRun();
+      }
+    };
+
+    async function startRun() {
+      // A. Prompt sensor orientation permissions (Required for newer iOS/some mobile devices)
+      if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+        try {
+          const permissionState = await DeviceOrientationEvent.requestPermission();
+          if (permissionState !== 'granted') {
+            console.warn("Sensor permission denied");
+          }
+        } catch (error) {
+          console.error("Orientation Permission request error:", error);
+        }
+      }
+
+      // B. Start Voice Recognition inside click interaction (Fixes Android Chrome autoplay mic block)
+      startSpeechRecognition();
+
+      // C. Transition system state parameters
+      isRunning = true;
+      startTime = performance.now();
+      startStopBtn.textContent = "STOP RUN";
+      startStopBtn.className = "danger";
+      voiceDisplay.textContent = "Listening...";
+      document.body.style.background = connected ? '#bae6fd' : '#e0f2fe';
+    }
+
+    function stopRun() {
+      isRunning = false;
+      startStopBtn.textContent = "START RUN";
+      startStopBtn.className = "success";
+      voiceDisplay.textContent = "Stopped";
+      
+      // Stop and clean up Voice Engine
+      if (recognition) {
+        recognition.onend = null; // Unhook automatic restarts
+        try {
+          recognition.stop();
+        } catch (e) {
+          console.warn("Speech stop warning: ", e);
+        }
+      }
+
+      // Send immediate stop values
+      window.stopAll();
+      if (connected) {
+        sendRaw('stopAll,');
+      }
+    }
+
+    // 3. Balance Control Calculation Math
+    function calculateBalance() {
+      const P_GAIN_BETA = 12;  // How hard the motors push back against front/back lean
+      const P_GAIN_GAMMA = 8;  // How much turning asymmetry is added for left/right leans
+
+      // Target centers adjusted natively by voice parameters
+      let targetBeta = 0 + voiceOffsetBeta;
+      let targetGamma = 0 + voiceOffsetGamma;
+
+      // Errors from balance point
+      let errorBeta = beta - targetBeta;
+      let errorGamma = gamma - targetGamma;
+
+      // Base safe movement tracking bounds
+      let baseNeutral = 1500; 
+
+      // Calculate adjustments
+      let pitchCorrection = errorBeta * P_GAIN_BETA;
+      let rollCorrection = errorGamma * P_GAIN_GAMMA;
+
+      // Apply adjustment signals across mirrored structural axles
+      let leftServoValue  = baseNeutral + pitchCorrection + rollCorrection;
+      let rightServoValue = baseNeutral - pitchCorrection + rollCorrection;
+
+      // Enforce physical protection caps (Safe Mode: 1300 - 1700 us)
+      leftServoValue  = Math.max(1300, Math.min(1700, leftServoValue));
+      rightServoValue = Math.max(1300, Math.min(1700, rightServoValue));
+
+      // Display internal metrics to human tracking boxes
+      printS1.textContent = Math.round(leftServoValue) + ' us';
+      printS2.textContent = Math.round(rightServoValue) + ' us';
+
+      // Push calculated speeds out to actual robot via safety plumbing wrapper
+      if (connected) {
+        window.sendServos(leftServoValue, rightServoValue, null, null, null, null, null, null);
+      }
+    }
+
+    // 4. Voice Command Control Processing (With user-gesture trigger fix)
+    function startSpeechRecognition() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        voiceDisplay.textContent = "Speech API not supported";
+        return;
+      }
+
+      // Avoid creating multiple duplicate listening context instances
+      if (!recognition) {
+        recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = false;
+        recognition.lang = 'en-US';
+
+        recognition.onresult = (event) => {
+          if (!isRunning) return; // Ignore updates if run is stopped
+          const lastResultIndex = event.results.length - 1;
+          const commandText = event.results[lastResultIndex][0].transcript.toLowerCase().trim();
+          
+          voiceDisplay.textContent = commandText;
+          processVoiceCommand(commandText);
+        };
+
+        recognition.onerror = (e) => { 
+          console.error("Speech Error: ", e); 
+          if (e.error === 'not-allowed') {
+            voiceDisplay.textContent = "Mic permission denied!";
+          }
+        };
+
+        recognition.onend = () => { 
+          // Automatically keep speech system alive ONLY if run sequence is still active
+          if (isRunning) {
+            try {
+              recognition.start(); 
+            } catch(e) {
+              console.warn("Speech restart skip: ", e);
+            }
+          }
+        };
+      }
+
+      try {
+        recognition.start();
+      } catch (e) {
+        console.warn("Speech API already running or context busy: ", e);
+      }
+    }
+
+    function processVoiceCommand(cmd) {
+      clearTimeout(voiceTimeout);
+      
+      // Temporary structural offset targets to shift balance profile weight
+      if (cmd.includes('forward')) {
+        voiceOffsetBeta = -10;  // Shift target forward for 1 second
+        voiceOffsetGamma = 0;
+      } else if (cmd.includes('backward')) {
+        voiceOffsetBeta = 10;   // Shift target backward for 1 second
+        voiceOffsetGamma = 0;
+      } else if (cmd.includes('left') || cmd.includes('turn left')) {
+        voiceOffsetBeta = 0;
+        voiceOffsetGamma = -15; // Induce banking tilt to left
+      } else if (cmd.includes('right') || cmd.includes('turn right')) {
+        voiceOffsetBeta = 0;
+        voiceOffsetGamma = 15;  // Induce banking tilt to right
+      }
+
+      // Reset shift tracking frame back to standard neutral after 1 second
+      voiceTimeout = setTimeout(() => {
+        voiceOffsetBeta = 0;
+        voiceOffsetGamma = 0;
+        if (isRunning) {
+          voiceDisplay.textContent = "Listening...";
+        }
+      }, 1000);
+    }
+
+    // 5. Data Logging Loop: Tables and Graphs
+    setInterval(() => {
+      // Only record data when the simulation run is active
+      if (!isRunning) return;
+
+      let currentTimeSeconds = ((performance.now() - startTime) / 1000).toFixed(1);
+      
+      // Read active calculated states
+      let currentS1 = parseInt(printS1.textContent);
+      let currentS2 = parseInt(printS2.textContent);
+
+      // A. Append Data to Live Table UI View
+      const newRow = document.createElement('tr');
+      newRow.innerHTML = `
+        <td>${currentTimeSeconds}s</td>
+        <td>${Math.round(beta)}°</td>
+        <td>${Math.round(gamma)}°</td>
+        <td>${currentS1}</td>
+        <td>${currentS2}</td>
+      `;
+      tableBody.insertBefore(newRow, tableBody.firstChild); // Insert new logs at top
+
+      // Cap UI entries list length to prevent infinite memory leaks on the mobile view
+      if (tableBody.children.length > 30) {
+        tableBody.removeChild(tableBody.lastChild);
+      }
+
+      // B. Push Data to Live Moving Graph View
+      liveChart.data.labels.push(currentTimeSeconds);
+      liveChart.data.datasets[0].data.push(beta);
+      liveChart.data.datasets[1].data.push(gamma);
+      liveChart.data.datasets[2].data.push(currentS1);
+      liveChart.data.datasets[3].data.push(currentS2);
+
+      // Keep only last 20 graph points clean on screen to ensure real-time rendering speed
+      if (liveChart.data.labels.length > 20) {
+        liveChart.data.labels.shift();
+        liveChart.data.datasets.forEach(dataset => dataset.data.shift());
+      }
+      liveChart.update('none'); // Update smoothly without computational rendering animations
+
+    }, 200); // Sample logs clean 5 times per second
+
+  </script>
+</body>
+</html>
