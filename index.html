@@ -111,6 +111,7 @@
     const SERVICE = 0xFFE0;
     const TX_CHAR = 0xFFE1;
 
+    let bleDevice = null;   // CRITICAL: Must maintain global reference to prevent Android garbage collection from disconnecting
     let bleChar   = null;
     let connected = false;
     let pending   = null;   
@@ -127,12 +128,16 @@
           filters: [{ namePrefix: '⠀' }],
           optionalServices: [SERVICE],
         });
+        
+        bleDevice = device; // Store reference globally to keep connection alive on Android Chrome
+        
         device.addEventListener('gattserverdisconnected', () => {
           connected = false;
           statusEl.textContent = 'Disconnected';
           document.body.style.background = '#fecaca'; // Turns screen red on disconnect
           stopRun();
         });
+        
         const server  = await device.gatt.connect();
         const service = await server.getPrimaryService(SERVICE);
         bleChar = await service.getCharacteristic(TX_CHAR);
@@ -162,11 +167,28 @@
       voiceOffsetGamma = 0;
     };
 
+    // CRITICAL: Chunk larger payloads into 20-byte BLE packets to prevent receiver overflows
     async function sendRaw(cmd) {
       if (!connected || !bleChar || writing) return;
       writing = true;
       try {
-        await bleChar.writeValue(new TextEncoder().encode(cmd));
+        const encoder = new TextEncoder();
+        const data = encoder.encode(cmd);
+        const chunkSize = 20; // Standard BLE MTU payload limit
+
+        for (let i = 0; i < data.length; i += chunkSize) {
+          const chunk = data.slice(i, i + chunkSize);
+          
+          // Use writeValueWithoutResponse if available for faster, safer transmission on Android
+          if (bleChar.writeValueWithoutResponse) {
+            await bleChar.writeValueWithoutResponse(chunk);
+          } else {
+            await bleChar.writeValue(chunk);
+          }
+          
+          // Tiny delay to let cheap serial microcontrollers process the input buffer
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
         lastSent = cmd;
       } catch (e) {
         console.warn('write failed', e);
@@ -196,6 +218,7 @@
     let startTime = performance.now();
     let isRunning = false; // State-tracking flag for start/stop toggle
     let recognition = null; // Hold speech recognition instance globally
+    let speechActive = false; // State-tracking flag to prevent crash-restarting speech engine
 
     // DOM Elements for real-time dashboard updates
     const printBeta = document.getElementById('print-beta');
@@ -286,14 +309,15 @@
       startStopBtn.className = "success";
       voiceDisplay.textContent = "Stopped";
       
-      // Stop and clean up Voice Engine
+      // Stop and clean up Voice Engine safely
       if (recognition) {
-        recognition.onend = null; // Unhook automatic restarts
+        recognition.onend = null; // Unhook automatic restarts to prevent loop crashes
         try {
           recognition.stop();
         } catch (e) {
           console.warn("Speech stop warning: ", e);
         }
+        speechActive = false;
       }
 
       // Send immediate stop values
@@ -341,7 +365,7 @@
       }
     }
 
-    // 4. Voice Command Control Processing (With user-gesture trigger fix)
+    // 4. Voice Command Control Processing (With robust auto-restart logic)
     function startSpeechRecognition() {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SpeechRecognition) {
@@ -349,12 +373,16 @@
         return;
       }
 
-      // Avoid creating multiple duplicate listening context instances
+      // Avoid creating multiple duplicate listening instances
       if (!recognition) {
         recognition = new SpeechRecognition();
         recognition.continuous = true;
         recognition.interimResults = false;
         recognition.lang = 'en-US';
+
+        recognition.onstart = () => {
+          speechActive = true;
+        };
 
         recognition.onresult = (event) => {
           if (!isRunning) return; // Ignore updates if run is stopped
@@ -369,25 +397,33 @@
           console.error("Speech Error: ", e); 
           if (e.error === 'not-allowed') {
             voiceDisplay.textContent = "Mic permission denied!";
+            stopRun();
           }
         };
 
         recognition.onend = () => { 
-          // Automatically keep speech system alive ONLY if run sequence is still active
+          speechActive = false;
+          // De-bounced auto-restart: allows browser audio pipelines to fully unload
           if (isRunning) {
-            try {
-              recognition.start(); 
-            } catch(e) {
-              console.warn("Speech restart skip: ", e);
-            }
+            setTimeout(() => {
+              if (isRunning && !speechActive) {
+                try {
+                  recognition.start(); 
+                } catch(e) {
+                  console.warn("Speech restart skipped: ", e);
+                }
+              }
+            }, 300); // 300ms cool-down prevents Chrome engine crashes
           }
         };
       }
 
-      try {
-        recognition.start();
-      } catch (e) {
-        console.warn("Speech API already running or context busy: ", e);
+      if (!speechActive) {
+        try {
+          recognition.start();
+        } catch (e) {
+          console.warn("Speech already active: ", e);
+        }
       }
     }
 
