@@ -84,10 +84,8 @@
     const TUNING = {
       targetBeta: 90,       
       targetGamma: 0,       
-      pGainBeta: 15,        // Proportional Gain (How hard to push)
-      dGainBeta: 25,        // Derivative Gain (The brakes to stop shaking)
+      pGainBeta: 15,        
       pGainGamma: 8,        
-      dGainGamma: 10,       
       voicePitchOffset: 20, 
       voiceRollOffset: 25,  
       servoNeutral: 1500,   
@@ -132,11 +130,14 @@
       if (!connected || !pending || pending === lastSent || writing) return;
       writing = true;
 
+      // THE FIX: Watchdog Timer
+      // Forcefully unlocks the writing guard if the Bluetooth stack hangs
       let watchdog = setTimeout(() => {
         writing = false;
       }, 150);
 
       try {
+        // Attempt faster "writeWithoutResponse" if the hardware supports it
         if (bleChar.properties && bleChar.properties.writeWithoutResponse) {
           await bleChar.writeValueWithoutResponse(new TextEncoder().encode(pending));
         } else {
@@ -163,11 +164,10 @@
     }
 
     // ==========================================
-    // SENSORS & MATH (Now with PD Control)
+    // SENSORS & MATH
     // ==========================================
     let beta = 0, gamma = 0, isRunning = false, startTime = 0;
     let vOffsetB = 0, vOffsetG = 0, voiceTimer = null;
-    let prevErrorBeta = 0, prevErrorGamma = 0; // Variables to track the rate of change
 
     window.addEventListener('deviceorientation', (e) => {
       beta = e.beta || 0;
@@ -195,11 +195,6 @@
           await DeviceOrientationEvent.requestPermission();
         }
         setupVoice();
-        
-        // Reset the PD derivative trackers on start
-        prevErrorBeta = beta - TUNING.targetBeta;
-        prevErrorGamma = gamma - TUNING.targetGamma;
-        
         startTime = performance.now();
         isRunning = true;
         document.getElementById('start-stop').textContent = "STOP RUN";
@@ -212,17 +207,8 @@
       let errorBeta = beta - (TUNING.targetBeta + vOffsetB);
       let errorGamma = gamma - (TUNING.targetGamma + vOffsetG);
 
-      // Advanced Math: Derivative (Rate of change of the error)
-      let dErrorBeta = errorBeta - prevErrorBeta;
-      let dErrorGamma = errorGamma - prevErrorGamma;
-
-      // Store current error for the next loop calculation
-      prevErrorBeta = errorBeta;
-      prevErrorGamma = errorGamma;
-
-      // Advanced Math: Apply Proportional AND Derivative tuning
-      let pitchCorrection = (errorBeta * TUNING.pGainBeta) + (dErrorBeta * TUNING.dGainBeta);
-      let rollCorrection = (errorGamma * TUNING.pGainGamma) + (dErrorGamma * TUNING.dGainGamma);
+      let pitchCorrection = errorBeta * TUNING.pGainBeta;
+      let rollCorrection = errorGamma * TUNING.pGainGamma;
 
       let leftPWM = TUNING.servoNeutral + pitchCorrection + rollCorrection;
       let rightPWM = TUNING.servoNeutral - pitchCorrection + rollCorrection;
