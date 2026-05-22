@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Stick 'Em Balancer Bot (Patched)</title>
+  <title>Stick 'Em Balancer Bot</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     body { font-family: system-ui, -apple-system, sans-serif; padding: 16px; background: #f3f4f6; color: #111; margin: 0; }
@@ -11,18 +11,23 @@
     .container { max-width: 600px; margin: 0 auto; }
     .panel { background: white; padding: 16px; border-radius: 12px; margin-bottom: 16px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
     .btn-group { display: flex; gap: 8px; margin-bottom: 12px; }
-    button { flex: 1; font-size: 16px; padding: 14px; border-radius: 8px; border: 0; cursor: pointer; font-weight: bold; }
+    button { flex: 1; font-size: 14px; padding: 12px; border-radius: 8px; border: 0; cursor: pointer; font-weight: bold; }
     .primary { background: #20a7d9; color: white; }
     .danger  { background: #ef4444; color: white; }
     .success { background: #22c55e; color: white; }
     .warning { background: #f59e0b; color: white; }
+    .secondary { background: #6b7280; color: white; }
     #status { font-size: 14px; text-align: center; color: #6b7280; margin-bottom: 12px; font-weight: bold; }
     .voice-box { background: #e0f2fe; border: 2px solid #0284c7; padding: 12px; text-align: center; border-radius: 8px; font-size: 18px; font-weight: bold; margin-bottom: 16px; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 16px; text-align: center; }
     .data-card { background: #f9fafb; padding: 10px; border-radius: 8px; border: 1px solid #e5e7eb; }
-    .data-card div:first-child { font-size: 12px; color: #6b7280; text-transform: uppercase; }
-    .data-card div:last-child { font-size: 20px; font-weight: bold; margin-top: 4px; }
-    .chart-container { position: relative; height: 220px; width: 100%; margin-bottom: 16px; }
+    .data-card div:first-child { font-size: 11px; color: #6b7280; text-transform: uppercase; font-weight: 600; }
+    .data-card div:last-child { font-size: 18px; font-weight: bold; margin-top: 4px; }
+    .chart-container { position: relative; height: 250px; width: 100%; margin-bottom: 16px; }
+    .table-container { overflow-x: auto; max-height: 250px; border: 1px solid #e5e7eb; border-radius: 8px; background: white; }
+    table { width: 100%; border-collapse: collapse; text-align: center; font-size: 12px; }
+    th { background: #f3f4f6; position: sticky; top: 0; padding: 8px; font-weight: 600; border-bottom: 2px solid #ddd; }
+    td { padding: 8px; border-bottom: 1px solid #e5e7eb; }
   </style>
 </head>
 <body>
@@ -33,23 +38,42 @@
     
     <div class="btn-group">
       <button id="connect" class="primary">1. Connect Board</button>
-      <button id="start-stop" class="success">2. START RUN</button>
+      <button id="calibrate" class="secondary">2. Calibrate Balance</button>
     </div>
     <div class="btn-group">
-      <button id="revive-voice" class="warning" style="display:none;">Restart Mic (If Stuck)</button>
+      <button id="start-stop" class="success">3. START RUN</button>
+      <button id="revive-voice" class="warning" style="display:none;">Restart Mic</button>
     </div>
 
     <div class="voice-box">Voice Command: <span id="voice-command">Waiting...</span></div>
 
     <div class="grid">
-      <div class="data-card"><div>Front/Back Tilt</div><div id="print-beta">0°</div></div>
-      <div class="data-card"><div>Left/Right Tilt</div><div id="print-gamma">0°</div></div>
-      <div class="data-card"><div>Left Servo</div><div id="print-s1">1500 us</div></div>
-      <div class="data-card"><div>Right Servo</div><div id="print-s2">1500 us</div></div>
+      <div class="data-card"><div>Front/Back Tilt (°)</div><div id="print-beta">0°</div></div>
+      <div class="data-card"><div>Left/Right Tilt (°)</div><div id="print-gamma">0°</div></div>
+      <div class="data-card"><div>Right Servo Adjustment (us)</div><div id="print-s2">1500</div></div>
+      <div class="data-card"><div>Left Servo Adjustment (us)</div><div id="print-s1">1500</div></div>
     </div>
 
     <div class="panel">
       <div class="chart-container"><canvas id="liveChart"></canvas></div>
+    </div>
+
+    <div class="panel">
+      <h3>Data Log</h3>
+      <div class="table-container">
+        <table id="data-table">
+          <thead>
+            <tr>
+              <th>Run Time (s)</th>
+              <th>Front/Back Tilt (°)</th>
+              <th>Left/Right Tilt (°)</th>
+              <th>Right Servo Adjustment (us)</th>
+              <th>Left Servo Adjustment (us)</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -58,15 +82,15 @@
     // TUNING VARIABLES
     // ==========================================
     const TUNING = {
-      targetBeta: 90,       
-      targetGamma: 0,       
-      pGainBeta: 15,        // Increased heavily. 1 degree of tilt = 15 points of PWM jump.
-      pGainGamma: 8,        
-      voicePitchOffset: 20, 
-      voiceRollOffset: 25,  
+      targetBeta: 90,       // Will be overwritten by the Calibrate button
+      targetGamma: 0,       // Will be overwritten by the Calibrate button
+      pGainBeta: 15,        // Multiplier for front/back tilt corrections
+      pGainGamma: 8,        // Multiplier for steering corrections
+      voicePitchOffset: 20, // Degrees to artificially lean when saying Forward/Backward
+      voiceRollOffset: 25,  // Degrees to artificially lean when turning Left/Right
       servoNeutral: 1500,   
-      servoMin: 1200,       // Widened range slightly
-      servoMax: 1800        // Widened range slightly
+      servoMin: 1200,       
+      servoMax: 1800        
     };
 
     // ==========================================
@@ -90,22 +114,20 @@
         connected = true;
         document.getElementById('status').textContent = 'Connected!';
         document.body.style.background = '#bae6fd';
-        setInterval(sendRaw, 50); // FIX 1: Throttle to 50ms (20Hz) to prevent disconnects
+        setInterval(sendRaw, 50); // 50ms (20Hz) limit to prevent disconnects
       } catch (e) {
         document.getElementById('status').textContent = 'Connection failed.';
       }
     };
 
+    // Left is Slot 1, Right is Slot 2
     window.sendServos = function (left, right) {
       let m1 = Math.max(1000, Math.min(2000, Math.round(left)));
       let m2 = Math.max(1000, Math.min(2000, Math.round(right)));
-      
-      // FIX 2: Strict 9-slot formatting perfectly matching the V2 blueprint. Trailing comma is mandatory.
       pending = `mv:${m1}:${m2}:1500:1500:-:-:-:-:-,`;
     };
 
     async function sendRaw() {
-      // FIX 1b: Deduplication. Only write if the command is actually new.
       if (!connected || !pending || pending === lastSent || writing) return;
       writing = true;
       try {
@@ -124,7 +146,7 @@
       pending = 'stopAll,';
       document.getElementById('status').textContent = 'Disconnected / Stopped';
       document.body.style.background = '#fecaca';
-      document.getElementById('start-stop').textContent = "2. START RUN";
+      document.getElementById('start-stop').textContent = "3. START RUN";
       document.getElementById('start-stop').className = "success";
       document.getElementById('revive-voice').style.display = 'none';
     }
@@ -143,10 +165,17 @@
       if (isRunning) calculateBalance();
     });
 
+    // Calibrate button fixes the "Fixed PWM" issue by setting the true 0 point
+    document.getElementById('calibrate').onclick = () => {
+      TUNING.targetBeta = beta;
+      TUNING.targetGamma = gamma;
+      alert(`Calibrated! Perfect balance is now F/B: ${Math.round(beta)}°, L/R: ${Math.round(gamma)}°`);
+    };
+
     document.getElementById('start-stop').onclick = async () => {
       if (isRunning) {
         isRunning = false;
-        document.getElementById('start-stop').textContent = "2. START RUN";
+        document.getElementById('start-stop').textContent = "3. START RUN";
         document.getElementById('start-stop').className = "success";
         document.getElementById('revive-voice').style.display = 'none';
         pending = 'stopAll,'; 
@@ -170,10 +199,11 @@
       let pitchCorrection = errorBeta * TUNING.pGainBeta;
       let rollCorrection = errorGamma * TUNING.pGainGamma;
 
+      // Assuming Left (S1) and Right (S2) are mounted mirroring each other
       let leftPWM = TUNING.servoNeutral + pitchCorrection + rollCorrection;
       let rightPWM = TUNING.servoNeutral - pitchCorrection + rollCorrection;
 
-      // FIX 2b: Deadband bypass. If the math generates a weak signal, force it higher so motors don't stall.
+      // Deadband bypass to prevent weak stalling signals
       if (leftPWM > 1500 && leftPWM < 1530) leftPWM = 1530;
       if (leftPWM < 1500 && leftPWM > 1470) leftPWM = 1470;
       if (rightPWM > 1500 && rightPWM < 1530) rightPWM = 1530;
@@ -182,14 +212,14 @@
       leftPWM = Math.max(TUNING.servoMin, Math.min(TUNING.servoMax, leftPWM));
       rightPWM = Math.max(TUNING.servoMin, Math.min(TUNING.servoMax, rightPWM));
 
-      document.getElementById('print-s1').textContent = Math.round(leftPWM) + ' us';
-      document.getElementById('print-s2').textContent = Math.round(rightPWM) + ' us';
+      document.getElementById('print-s1').textContent = Math.round(leftPWM);
+      document.getElementById('print-s2').textContent = Math.round(rightPWM);
 
       if (connected) window.sendServos(leftPWM, rightPWM);
     }
 
     // ==========================================
-    // ROBUST VOICE RECOGNITION
+    // VOICE RECOGNITION
     // ==========================================
     let recognition = null;
     let speechActive = false;
@@ -207,7 +237,7 @@
       }
       
       recognition = new SpeechRecognition();
-      recognition.continuous = false; // Must be false for Android Chrome
+      recognition.continuous = false; 
       recognition.interimResults = false;
       
       recognition.onstart = () => { speechActive = true; };
@@ -215,16 +245,12 @@
       recognition.onresult = (e) => {
         if (!isRunning) return;
         const cmd = e.results[e.results.length - 1][0].transcript.toLowerCase();
-        document.getElementById('voice-command').textContent = cmd;
+        document.getElementById('voice-command').textContent = `Heard: "${cmd}"`;
         handleCommand(cmd);
       };
 
-      recognition.onerror = (e) => {
-        console.warn("Speech error:", e.error);
-        speechActive = false;
-      };
+      recognition.onerror = (e) => { speechActive = false; };
 
-      // FIX 3: Increase restart delay to 500ms to prevent Chrome from blocking the loop
       recognition.onend = () => {
         speechActive = false;
         if (isRunning) {
@@ -239,7 +265,6 @@
       try { recognition.start(); } catch(e){}
     }
 
-    // Manual override button if the mic gets permanently stuck
     document.getElementById('revive-voice').onclick = () => {
        speechActive = false;
        try { recognition.stop(); } catch(e){}
@@ -249,7 +274,7 @@
     function handleCommand(cmd) {
       clearTimeout(voiceTimer);
       if (cmd.includes('forward')) { vOffsetB = -TUNING.voicePitchOffset; vOffsetG = 0; }
-      else if (cmd.includes('back')) { vOffsetB = TUNING.voicePitchOffset; vOffsetG = 0; }
+      else if (cmd.includes('backward') || cmd.includes('back')) { vOffsetB = TUNING.voicePitchOffset; vOffsetG = 0; }
       else if (cmd.includes('left')) { vOffsetB = 0; vOffsetG = -TUNING.voiceRollOffset; }
       else if (cmd.includes('right')) { vOffsetB = 0; vOffsetG = TUNING.voiceRollOffset; }
       else return;
@@ -261,21 +286,24 @@
     }
 
     // ==========================================
-    // CHART UPDATES
+    // CHART & TABLE UPDATES (All 4 Lines Restored)
     // ==========================================
     const ctx = document.getElementById('liveChart').getContext('2d');
     const liveChart = new Chart(ctx, {
       type: 'line',
       data: { labels: [], datasets: [
-        { label: 'FB Tilt', data: [], borderColor: 'red', tension: 0.1, pointRadius: 0 },
-        { label: 'Left PWM', data: [], borderColor: 'green', tension: 0.1, pointRadius: 0, yAxisID: 'y1' }
+        { label: 'Front/Back Tilt (°)', data: [], borderColor: '#ef4444', tension: 0.1, pointRadius: 0 },
+        { label: 'Left/Right Tilt (°)', data: [], borderColor: '#3b82f6', tension: 0.1, pointRadius: 0 },
+        { label: 'Right Servo (us)', data: [], borderColor: '#f59e0b', tension: 0.1, pointRadius: 0, yAxisID: 'y1' },
+        { label: 'Left Servo (us)', data: [], borderColor: '#10b981', tension: 0.1, pointRadius: 0, yAxisID: 'y1' }
       ]},
       options: {
         responsive: true, maintainAspectRatio: false, animation: false,
+        interaction: { mode: 'index', intersect: false },
         scales: {
-          x: { display: false },
-          y: { min: -180, max: 180 },
-          y1: { position: 'right', min: 1000, max: 2000 }
+          x: { display: true, title: { display: true, text: 'Run Time (s)' } },
+          y: { min: -180, max: 180, title: { display: true, text: 'Degrees' } },
+          y1: { position: 'right', min: 1000, max: 2000, title: { display: true, text: 'PWM (us)' }, grid: { drawOnChartArea: false } }
         }
       }
     });
@@ -284,11 +312,22 @@
       if (!isRunning) return;
       let timeStr = ((performance.now() - startTime) / 1000).toFixed(1);
       let lPWM = parseInt(document.getElementById('print-s1').textContent);
+      let rPWM = parseInt(document.getElementById('print-s2').textContent);
 
+      // Update Table (Right servo goes before Left to match headers)
+      const row = `<tr><td>${timeStr}</td><td>${Math.round(beta)}</td><td>${Math.round(gamma)}</td><td>${rPWM}</td><td>${lPWM}</td></tr>`;
+      const tbody = document.querySelector('#data-table tbody');
+      tbody.insertAdjacentHTML('afterbegin', row);
+      if (tbody.children.length > 20) tbody.removeChild(tbody.lastChild);
+
+      // Update Chart
       liveChart.data.labels.push(timeStr);
       liveChart.data.datasets[0].data.push(beta);
-      liveChart.data.datasets[1].data.push(lPWM);
-      if (liveChart.data.labels.length > 25) {
+      liveChart.data.datasets[1].data.push(gamma);
+      liveChart.data.datasets[2].data.push(rPWM); // Right Servo
+      liveChart.data.datasets[3].data.push(lPWM); // Left Servo
+      
+      if (liveChart.data.labels.length > 30) {
         liveChart.data.labels.shift();
         liveChart.data.datasets.forEach(d => d.data.shift());
       }
